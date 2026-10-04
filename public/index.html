@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vấn Đạo Tu Tiên 3D - Server Edition</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #000; }
+        #canvas-container { width: 100vw; height: 100vh; display: block; }
+        
+        /* Giao diện Đăng nhập / Đăng ký UI */
+        #auth-screen {
+            position: fixed; inset: 0; background: radial-gradient(circle, #1a2a3a 0%, #050a0e 100%);
+            display: flex; justify-content: center; align-items: center; z-index: 100;
+        }
+        .auth-card {
+            background: rgba(15, 25, 35, 0.85); border: 1px solid #5fd1b0; padding: 30px;
+            border-radius: 12px; width: 340px; box-shadow: 0 0 20px rgba(95, 209, 176, 0.3); text-align: center; color: #fff;
+        }
+        .auth-card h2 { color: #e8c070; margin-bottom: 20px; font-size: 24px; text-transform: uppercase; }
+        .auth-card input {
+            width: 100%; padding: 10px; margin: 8px 0; background: #0a1218; border: 1px solid #35605c;
+            color: #fff; border-radius: 6px; box-sizing: border-box; font-size: 14px;
+        }
+        .auth-card button {
+            width: 100%; padding: 10px; margin-top: 12px; border: none; background: #5fd1b0;
+            color: #050a0e; font-weight: bold; font-size: 15px; border-radius: 6px; cursor: pointer; transition: 0.2s;
+        }
+        .auth-card button:hover { background: #e8c070; }
+        .auth-card .toggle-btn { background: transparent; color: #9db0aa; border: none; margin-top: 10px; text-decoration: underline; }
+
+        /* HUD Trò chơi */
+        #hud { position: fixed; top: 15px; left: 15px; color: #fff; pointer-events: none; display: none; z-index: 10; }
+        .bar { width: 200px; height: 14px; background: rgba(0,0,0,0.6); border: 1px solid #5fd1b0; margin-bottom: 6px; border-radius: 7px; overflow: hidden; }
+        .fill-hp { width: 100%; height: 100%; background: linear-gradient(90deg, #ff4a4a, #e0553f); }
+        .fill-mp { width: 100%; height: 100%; background: linear-gradient(90deg, #6aa8ff, #2d62c8); }
+        
+        #controls-guide {
+            position: fixed; bottom: 15px; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.6); color: #e8c070; padding: 8px 16px; border-radius: 20px;
+            font-size: 13px; border: 1px solid #35605c; display: none; pointer-events: none;
+        }
+    </style>
+    <!-- Thư viện Three.js & Socket.io Client -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="/socket.io/socket.io.js"></script>
+</head>
+<body>
+
+    <!-- Màn hình Đăng nhập / Đăng ký -->
+    <div id="auth-screen">
+        <div class="auth-card">
+            <h2 id="auth-title">Vấn Đạo Tu Tiên 3D</h2>
+            <input type="text" id="username" placeholder="Tên tài khoản" maxlength="16">
+            <input type="password" id="password" placeholder="Mật khẩu">
+            <button id="btn-submit" onclick="submitAuth()">Đăng Nhập</button>
+            <button class="toggle-btn" onclick="toggleAuthMode()">Chưa có tài khoản? Đăng ký ngay</button>
+        </div>
+    </div>
+
+    <!-- HUD Game -->
+    <div id="hud">
+        <div style="font-weight: bold; color: #e8c070; margin-bottom: 4px;" id="player-name">Tên nhân vật</div>
+        <div class="bar"><div class="fill-hp" id="hp-bar"></div></div>
+        <div class="bar"><div class="fill-mp" id="mp-bar"></div></div>
+    </div>
+
+    <div id="controls-guide">Dùng phím <b>W, A, S, D</b> để di chuyển | Phím <b>J</b>, <b>K</b> để ra chiêu</div>
+
+    <div id="canvas-container"></div>
+
+    <script>
+        let socket = io();
+        let isRegisterMode = false;
+        let myPlayerId = null;
+
+        // --- Three.js Variables ---
+        let scene, camera, renderer;
+        let playerMeshes = {};
+        let monsterMeshes = {};
+        let keys = {};
+        let localPlayerPosition = { x: 0, y: 0, z: 0, rotationY: 0 };
+
+        function toggleAuthMode() {
+            isRegisterMode = !isRegisterMode;
+            document.getElementById('auth-title').innerText = isRegisterMode ? "Đăng ký Tài Khoản" : "Vấn Đạo Tu Tiên 3D";
+            document.getElementById('btn-submit').innerText = isRegisterMode ? "Đăng Ký" : "Đăng Nhập";
+        }
+
+        function submitAuth() {
+            const username = document.getElementById('username').value.trim();
+            const password = document.getElementById('password').value.trim();
+
+            if (!username || !password) return alert("Vui lòng nhập đầy đủ thông tin!");
+
+            const event = isRegisterMode ? 'register' : 'login';
+            socket.emit(event, { username, password }, (res) => {
+                if (!res.success) {
+                    alert(res.message);
+                } else {
+                    if (isRegisterMode) {
+                        alert(res.message);
+                        toggleAuthMode();
+                    } else {
+                        document.getElementById('auth-screen').style.display = 'none';
+                        document.getElementById('hud').style.display = 'block';
+                        document.getElementById('controls-guide').style.display = 'block';
+                        document.getElementById('player-name').innerText = res.userData.username;
+                        myPlayerId = socket.id;
+                        init3DWorld();
+                    }
+                }
+            });
+        }
+
+        // --- Khởi Tạo Thế Giới 3D ---
+        function init3DWorld() {
+            const container = document.getElementById('canvas-container');
+
+            // Scene & Camera
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x0a141d);
+            scene.fog = new THREE.FogExp2(0x0a141d, 0.015);
+
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+
+            // Renderer + Shadow Mapping (Bóng đổ 3D)
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            container.appendChild(renderer.domElement);
+
+            // Ánh sáng Ambient & Directional
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+            scene.add(ambientLight);
+
+            const dirLight = new THREE.DirectionalLight(0xffe0a0, 1.2);
+            dirLight.position.set(20, 40, 20);
+            dirLight.castShadow = true;
+            dirLight.shadow.mapSize.width = 2048;
+            dirLight.shadow.mapSize.height = 2048;
+            scene.add(dirLight);
+
+            // Mặt đất 3D
+            const groundGeo = new THREE.PlaneGeometry(200, 200);
+            const groundMat = new THREE.MeshStandardMaterial({ color: 0x1b322c, roughness: 0.8 });
+            const ground = new THREE.Mesh(groundGeo, groundMat);
+            ground.rotation.x = -Math.PI / 2;
+            ground.receiveShadow = true;
+            scene.add(ground);
+
+            // Lưới Trang trí Mặt đất
+            const grid = new THREE.GridHelper(200, 40, 0x5fd1b0, 0x25453e);
+            grid.position.y = 0.01;
+            scene.add(grid);
+
+            // Lắng nghe sự kiện bàn phím
+            window.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+            window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+            window.addEventListener('resize', onWindowResize);
+
+            // Lắng nghe mạng từ Server Socket.io
+            setupSocketListeners();
+
+            // Vòng lặp render
+            animate();
+        }
+
+        function createPlayerMesh(color = 0x5fd1b0) {
+            const group = new THREE.Group();
+            // Thân nhân vật
+            const bodyGeo = new THREE.CylinderGeometry(0.4, 0.6, 1.8, 8);
+            const bodyMat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.3 });
+            const body = new THREE.Mesh(bodyGeo, bodyMat);
+            body.position.y = 0.9;
+            body.castShadow = true;
+            group.add(body);
+
+            // Đầu nhân vật
+            const headGeo = new THREE.SphereGeometry(0.35, 16, 16);
+            const headMat = new THREE.MeshStandardMaterial({ color: 0xffdfc4 });
+            const head = new THREE.Mesh(headGeo, headMat);
+            head.position.y = 2.0;
+            head.castShadow = true;
+            group.add(head);
+
+            return group;
+        }
+
+        function createMonsterMesh(type) {
+            const geo = new THREE.BoxGeometry(1.2, 1.2, 1.2);
+            let color = 0xff4a4a;
+            if (type === 'ice') color = 0x6aa8ff;
+            if (type === 'boss') color = 0xe8c070;
+
+            const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.4 });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.y = 0.6;
+            mesh.castShadow = true;
+            return mesh;
+        }
+
+        function setupSocketListeners() {
+            socket.on('initGame', (data) => {
+                // Khởi tạo danh sách người chơi
+                Object.keys(data.players).forEach(id => {
+                    const p = data.players[id];
+                    const mesh = createPlayerMesh(id === myPlayerId ? 0xe8c070 : 0x5fd1b0);
+                    mesh.position.set(p.x, p.y, p.z);
+                    scene.add(mesh);
+                    playerMeshes[id] = mesh;
+                });
+
+                // Khởi tạo quái vật
+                data.monsters.forEach(m => {
+                    const mesh = createMonsterMesh(m.type);
+                    mesh.position.set(m.x, m.y, m.z);
+                    scene.add(mesh);
+                    monsterMeshes[m.id] = mesh;
+                });
+            });
+
+            socket.on('playerJoined', (p) => {
+                const mesh = createPlayerMesh(0x5fd1b0);
+                mesh.position.set(p.x, p.y, p.z);
+                scene.add(mesh);
+                playerMeshes[p.id] = mesh;
+            });
+
+            socket.on('playerMoved', (p) => {
+                if (playerMeshes[p.id]) {
+                    playerMeshes[p.id].position.set(p.x, p.y, p.z);
+                    if (p.rotationY) playerMeshes[p.id].rotation.y = p.rotationY;
+                }
+            });
+
+            socket.on('playerLeft', (id) => {
+                if (playerMeshes[id]) {
+                    scene.remove(playerMeshes[id]);
+                    delete playerMeshes[id];
+                }
+            });
+
+            socket.on('updateMonsters', (monsters) => {
+                monsters.forEach(m => {
+                    if (monsterMeshes[m.id]) {
+                        monsterMeshes[m.id].position.set(m.x, m.y, m.z);
+                    }
+                });
+            });
+
+            socket.on('skillEffect', (data) => {
+                // Hiệu ứng hạt vòng tròn khi thi triển kỹ năng
+                const ringGeo = new THREE.RingGeometry(0.2, data.range || 3, 32);
+                const ringMat = new THREE.MeshBasicMaterial({ color: 0x5fd1b0, side: THREE.DoubleSide, transparent: true, opacity: 0.8 });
+                const ring = new THREE.Mesh(ringGeo, ringMat);
+                ring.rotation.x = Math.PI / 2;
+                ring.position.set(data.x, 0.05, data.z);
+                scene.add(ring);
+
+                // Biến mất dần
+                let opacity = 0.8;
+                const interval = setInterval(() => {
+                    opacity -= 0.05;
+                    ring.material.opacity = opacity;
+                    if (opacity <= 0) {
+                        scene.remove(ring);
+                        clearInterval(interval);
+                    }
+                }, 30);
+            });
+        }
+
+        // --- Cập nhật vị trí & Vòng lặp Render ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // Điều khiển Nhân vật Chính
+            if (myPlayerId && playerMeshes[myPlayerId]) {
+                const myMesh = playerMeshes[myPlayerId];
+                const speed = 0.15;
+                let moved = false;
+
+                if (keys['w']) { myMesh.position.z -= speed; myMesh.rotation.y = Math.PI; moved = true; }
+                if (keys['s']) { myMesh.position.z += speed; myMesh.rotation.y = 0; moved = true; }
+                if (keys['a']) { myMesh.position.x -= speed; myMesh.rotation.y = -Math.PI / 2; moved = true; }
+                if (keys['d']) { myMesh.position.x += speed; myMesh.rotation.y = Math.PI / 2; moved = true; }
+
+                // Thi triển Kỹ năng (Skill)
+                if (keys['j']) {
+                    keys['j'] = false; // Tránh spam quá nhanh
+                    socket.emit('castSkill', {
+                        x: myMesh.position.x,
+                        z: myMesh.position.z,
+                        range: 4,
+                        damage: 35
+                    });
+                }
+
+                if (moved) {
+                    // Cập nhật Camera đi theo Nhân vật góc nhìn thứ 3
+                    camera.position.set(myMesh.position.x, myMesh.position.y + 12, myMesh.position.z + 16);
+                    camera.lookAt(myMesh.position);
+
+                    // Gửi vị trí lên Máy chủ
+                    socket.emit('move', {
+                        x: myMesh.position.x,
+                        y: myMesh.position.y,
+                        z: myMesh.position.z,
+                        rotationY: myMesh.rotation.y
+                    });
+                }
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+    </script>
+</body>
+  </html>
